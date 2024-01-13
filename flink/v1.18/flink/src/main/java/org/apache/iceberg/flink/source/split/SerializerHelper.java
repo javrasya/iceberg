@@ -32,124 +32,51 @@ import org.apache.flink.core.memory.DataOutputSerializer;
  */
 public class SerializerHelper implements Serializable {
 
-  public static void writeLongUTF(DataOutputSerializer out, String str) throws IOException {
-    int strlen = str.length();
-    int utflen = 0;
-    int c;
+  /** */
+  private static final int BIGGEST_CHARACTER_SIZE_IN_BYTES = 3;
 
-    /* use charAt instead of copying String to char array */
-    for (int i = 0; i < strlen; i++) {
-      c = str.charAt(i);
-      if ((c >= 0x0001) && (c <= 0x007F)) {
-        utflen++;
-      } else if (c > 0x07FF) {
-        utflen += 3;
-      } else {
-        utflen += 2;
-      }
+  /**
+   * Maximum length of a serialized UTF string. This is the maximum length of a string that can be
+   * encoded
+   */
+  private static final int MAX_SERIALIZED_UTF_LENGTH = 65535 / BIGGEST_CHARACTER_SIZE_IN_BYTES;
+
+  /**
+   * Writes a string to the given output view as chunks safely without hitting the maximum possible
+   * length which can fit in an unsigned short which is 65kb. There are special characters which can
+   * take up more space than 1 byte and the biggest one is 3 bytes (Those characters > 0x07FF). So
+   * the provided string is turns into chunks size of 65kb/3 which covers the worst case scenario
+   * where all the characters in the string are 3 bytes long.
+   *
+   * @param out The output view to write to.
+   * @param str The string to be written as chunks.
+   * @throws IOException Thrown, if the serialization encountered an I/O related error.
+   */
+  public static void writeUTFAsChunks(DataOutputSerializer out, String str) throws IOException {
+    int numberOfChunks = (str.length() / MAX_SERIALIZED_UTF_LENGTH) + 1;
+    out.writeShort(numberOfChunks);
+    for (int i = 0; i < numberOfChunks; ++i) {
+      int start = i * MAX_SERIALIZED_UTF_LENGTH;
+      int end = Math.min((i + 1) * MAX_SERIALIZED_UTF_LENGTH, str.length());
+      String chunk = str.substring(start, end);
+      out.writeUTF(chunk);
     }
-    out.writeInt(utflen);
-
-    int len = Math.max(1024, utflen);
-
-    byte[] bytearr = new byte[len];
-    int count = 0;
-
-    int i;
-    for (i = 0; i < strlen; i++) {
-      c = str.charAt(i);
-      if (!((c >= 0x0001) && (c <= 0x007F))) {
-        break;
-      }
-      bytearr[count++] = (byte) c;
-    }
-
-    for (; i < strlen; i++) {
-      c = str.charAt(i);
-      if ((c >= 0x0001) && (c <= 0x007F)) {
-        bytearr[count++] = (byte) c;
-
-      } else if (c > 0x07FF) {
-        bytearr[count++] = (byte) (0xE0 | ((c >> 12) & 0x0F));
-        bytearr[count++] = (byte) (0x80 | ((c >> 6) & 0x3F));
-        bytearr[count++] = (byte) (0x80 | (c & 0x3F));
-      } else {
-        bytearr[count++] = (byte) (0xC0 | ((c >> 6) & 0x1F));
-        bytearr[count++] = (byte) (0x80 | (c & 0x3F));
-      }
-    }
-
-    out.write(bytearr, 0, count);
   }
 
-  public static String readLongUTF(DataInputDeserializer in) throws IOException {
-    int utflen = in.readInt();
-    byte[] bytearr = new byte[utflen];
-    char[] chararr = new char[utflen];
-
-    int c, char2, char3;
-    int count = 0;
-    int chararrCount = 0;
-
-    in.readFully(bytearr, 0, utflen);
-
-    while (count < utflen) {
-      c = (int) bytearr[count] & 0xff;
-      if (c > 127) {
-        break;
-      }
-      count++;
-      chararr[chararrCount++] = (char) c;
+  /**
+   * Reads a string from the given input view chunk by chunk to build the whole text. The string was
+   * previously written using the writeUTFAsChunks method.
+   *
+   * @param in The input view to read from.
+   * @return The string that has been read.
+   * @throws IOException Thrown, if the deserialization encountered an I/O related error.
+   */
+  public static String readUTFFromChunks(DataInputDeserializer in) throws IOException {
+    int numberOfChunks = in.readShort();
+    StringBuilder builder = new StringBuilder();
+    for (int i = 0; i < numberOfChunks; ++i) {
+      builder.append(in.readUTF());
     }
-
-    while (count < utflen) {
-      c = (int) bytearr[count] & 0xff;
-      switch (c >> 4) {
-        case 0:
-        case 1:
-        case 2:
-        case 3:
-        case 4:
-        case 5:
-        case 6:
-        case 7:
-          /* 0xxxxxxx */
-          count++;
-          chararr[chararrCount++] = (char) c;
-          break;
-        case 12:
-        case 13:
-          /* 110x xxxx 10xx xxxx */
-          count += 2;
-          if (count > utflen) {
-            throw new UTFDataFormatException("malformed input: partial character at end");
-          }
-          char2 = (int) bytearr[count - 1];
-          if ((char2 & 0xC0) != 0x80) {
-            throw new UTFDataFormatException("malformed input around byte " + count);
-          }
-          chararr[chararrCount++] = (char) (((c & 0x1F) << 6) | (char2 & 0x3F));
-          break;
-        case 14:
-          /* 1110 xxxx 10xx xxxx 10xx xxxx */
-          count += 3;
-          if (count > utflen) {
-            throw new UTFDataFormatException("malformed input: partial character at end");
-          }
-          char2 = (int) bytearr[count - 2];
-          char3 = (int) bytearr[count - 1];
-          if (((char2 & 0xC0) != 0x80) || ((char3 & 0xC0) != 0x80)) {
-            throw new UTFDataFormatException("malformed input around byte " + (count - 1));
-          }
-          chararr[chararrCount++] =
-              (char) (((c & 0x0F) << 12) | ((char2 & 0x3F) << 6) | (char3 & 0x3F));
-          break;
-        default:
-          /* 10xx xxxx, 1111 xxxx */
-          throw new UTFDataFormatException("malformed input around byte " + count);
-      }
-    }
-    // The number of chars produced may be less than utflen
-    return new String(chararr, 0, chararrCount);
+    return builder.toString();
   }
 }

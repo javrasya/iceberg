@@ -147,7 +147,33 @@ public class IcebergSourceSplit implements SourceSplit, Serializable {
 
       for (FileScanTask fileScanTask : fileScanTasks) {
         String taskJson = FileScanTaskParser.toJson(fileScanTask);
-        SerializerHelper.writeLongUTF(out, taskJson);
+        out.writeUTF(taskJson);
+      }
+
+      serializedBytesCache = out.getCopyOfBuffer();
+      out.clear();
+    }
+
+    return serializedBytesCache;
+  }
+
+  byte[] serializeV3() throws IOException {
+    if (serializedBytesCache == null) {
+      DataOutputSerializer out = SERIALIZER_CACHE.get();
+      Collection<FileScanTask> fileScanTasks = task.tasks();
+      Preconditions.checkArgument(
+          fileOffset >= 0 && fileOffset < fileScanTasks.size(),
+          "Invalid file offset: %s. Should be within the range of [0, %s)",
+          fileOffset,
+          fileScanTasks.size());
+
+      out.writeInt(fileOffset);
+      out.writeLong(recordOffset);
+      out.writeInt(fileScanTasks.size());
+
+      for (FileScanTask fileScanTask : fileScanTasks) {
+        String taskJson = FileScanTaskParser.toJson(fileScanTask);
+        SerializerHelper.writeUTFAsChunks(out, taskJson);
       }
 
       serializedBytesCache = out.getCopyOfBuffer();
@@ -166,7 +192,25 @@ public class IcebergSourceSplit implements SourceSplit, Serializable {
 
     List<FileScanTask> tasks = Lists.newArrayListWithCapacity(taskCount);
     for (int i = 0; i < taskCount; ++i) {
-      String taskJson = SerializerHelper.readLongUTF(in);
+      String taskJson = in.readUTF();
+      FileScanTask task = FileScanTaskParser.fromJson(taskJson, caseSensitive);
+      tasks.add(task);
+    }
+
+    CombinedScanTask combinedScanTask = new BaseCombinedScanTask(tasks);
+    return IcebergSourceSplit.fromCombinedScanTask(combinedScanTask, fileOffset, recordOffset);
+  }
+
+  static IcebergSourceSplit deserializeV3(byte[] serialized, boolean caseSensitive)
+      throws IOException {
+    DataInputDeserializer in = new DataInputDeserializer(serialized);
+    int fileOffset = in.readInt();
+    long recordOffset = in.readLong();
+    int taskCount = in.readInt();
+
+    List<FileScanTask> tasks = Lists.newArrayListWithCapacity(taskCount);
+    for (int i = 0; i < taskCount; ++i) {
+      String taskJson = SerializerHelper.readUTFFromChunks(in);
       FileScanTask task = FileScanTaskParser.fromJson(taskJson, caseSensitive);
       tasks.add(task);
     }
