@@ -32,7 +32,7 @@ import org.apache.flink.core.memory.DataOutputSerializer;
  */
 public class SerializerHelper implements Serializable {
 
-  /** */
+  /** The biggest character in UTF-8 encoding takes 3 bytes (Those characters > 0x07FF). */
   private static final int BIGGEST_CHARACTER_SIZE_IN_BYTES = 3;
 
   /**
